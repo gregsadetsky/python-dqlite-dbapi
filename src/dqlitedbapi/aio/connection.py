@@ -28,15 +28,15 @@ from dqlitedbapi._busy import retry_on_busy
 from dqlitedbapi._stubs import UnsupportedSqlite3Api
 from dqlitedbapi.aio.cursor import AsyncCursor
 from dqlitedbapi.exceptions import (
-    AMBIGUOUS_COMMIT_CODES,
     FAILED_TO_CONNECT_PREFIX,
-    AmbiguousCommitError,
     ErrorAttributes,
     InterfaceError,
     NotSupportedError,
     OperationalError,
     ProgrammingError,
+    ambiguous_commit,
     call,
+    is_in_doubt,
     is_no_transaction_error,
     raise_if_forked,
     translate,
@@ -391,13 +391,8 @@ class AsyncConnection(UnsupportedSqlite3Api, ErrorAttributes):
             except OperationalError as exc:
                 if is_no_transaction_error(exc):
                     return
-                if verb == "COMMIT" and exc.code in AMBIGUOUS_COMMIT_CODES:
-                    raise AmbiguousCommitError(
-                        "ambiguous commit: leadership lost during COMMIT; the write may or "
-                        f"may not have been persisted. Original: {exc}",
-                        code=exc.code,
-                        raw_message=exc.raw_message,
-                    ) from exc
+                if verb == "COMMIT" and is_in_doubt(exc):
+                    raise ambiguous_commit(exc, "COMMIT did not complete") from exc
                 raise
 
     @contextlib.asynccontextmanager

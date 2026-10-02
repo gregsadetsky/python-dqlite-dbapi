@@ -42,6 +42,8 @@ class Statement:
     is_pragma: bool
     is_commit: bool
     is_tx_control: bool
+    is_write: bool
+    """Leading keyword is neither a read (SELECT, VALUES, PRAGMA, EXPLAIN) nor tx control."""
 
 
 def classify(sql: str) -> Statement:
@@ -60,6 +62,7 @@ def classify(sql: str) -> Statement:
         is_pragma=keyword == "PRAGMA",
         is_commit=keyword in ("COMMIT", "END"),
         is_tx_control=keyword in _TX_CONTROL,
+        is_write=keyword not in _ROW_RETURNING and keyword not in _TX_CONTROL,
     )
 
 

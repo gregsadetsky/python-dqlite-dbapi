@@ -84,16 +84,23 @@ including `"SERIALIZABLE"` and `"AUTOCOMMIT"` — raises `ProgrammingError`,
 because the qualifier cannot change dqlite's single serialized isolation
 level.
 
-## Leader flips during COMMIT
+## Writes in doubt
 
-If the leader loses leadership *after* the COMMIT entry was submitted, the
-write is in doubt — Raft may already have replicated it — and the driver
-raises `AmbiguousCommitError` (an `OperationalError` subclass, so
-`except OperationalError` still catches it). Use idempotent DML (`INSERT OR
-REPLACE`, `UPDATE` on a unique key) or an out-of-band state check before
-retrying. A plain not-leader rejection *before* the entry was submitted is a
-clean failure (the write definitely did not apply) and raises a plain
-`OperationalError`.
+A write can be applied even though the caller gets an error: the leader
+reports leadership lost, or the connection breaks before the reply comes back.
+For a `COMMIT`, a `RELEASE`, or a write outside a transaction (in autocommit
+each write is its own commit), the driver then raises `AmbiguousCommitError`
+(an `OperationalError` subclass, so `except OperationalError` still catches
+it). Raft may already have replicated the entry. Use idempotent DML (`INSERT
+OR REPLACE`, `UPDATE` on a unique key) or an out-of-band state check before
+retrying.
+
+Leadership lost is reported both after the entry was submitted and, in
+autocommit, by the check the server runs before the statement; the two are
+indistinguishable to the client, so both are treated as in doubt. A plain
+not-leader rejection is a clean failure (the write did not apply) and raises a
+plain `OperationalError`, and so does a write inside a transaction whose
+session is lost: the transaction goes with it.
 
 ## With SQLAlchemy
 

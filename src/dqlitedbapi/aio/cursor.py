@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Self
 from dqlitedbapi import _sql
 from dqlitedbapi._busy import retry_on_busy
 from dqlitedbapi.exceptions import (
-    AMBIGUOUS_COMMIT_CODES,
-    AmbiguousCommitError,
     DataError,
     InterfaceError,
     NotSupportedError,
     OperationalError,
     ProgrammingError,
+    ambiguous_commit,
     call,
+    is_in_doubt,
 )
 from dqlitedbapi.types import (
     UNKNOWN,
@@ -320,8 +320,23 @@ class AsyncCursor:
         sql: str,
         params: list[Any] | None,
     ) -> None:
+        commits = (
+            statement.is_commit
+            or statement.keyword == "RELEASE"
+            or (statement.is_write and not client.in_transaction)
+        )
+        try:
+            if statement.returns_rows:
+                columns, column_types, row_types, rows = await call(
+                    client.query_raw_typed(sql, params)
+                )
+            else:
+                last_id, affected = await call(client.execute(sql, params))
+        except OperationalError as exc:
+            if commits and is_in_doubt(exc):
+                raise ambiguous_commit(exc, f"{statement.keyword} did not complete") from exc
+            raise
         if statement.returns_rows:
-            columns, column_types, row_types, rows = await call(client.query_raw_typed(sql, params))
             if not columns:  # write-form PRAGMA: no result set
                 return
             codes = _type_codes(len(columns), column_types, row_types)
@@ -332,17 +347,6 @@ class AsyncCursor:
             self._index = 0
             self._rowcount = -1 if statement.is_pragma else len(rows)
             return
-        try:
-            last_id, affected = await call(client.execute(sql, params))
-        except OperationalError as exc:
-            if statement.is_commit and exc.code in AMBIGUOUS_COMMIT_CODES:
-                raise AmbiguousCommitError(
-                    "ambiguous commit: leadership lost during COMMIT; the write may or may "
-                    f"not have been persisted. Original: {exc}",
-                    code=exc.code,
-                    raw_message=exc.raw_message,
-                ) from exc
-            raise
         if statement.is_insert:
             self._lastrowid = _signed(last_id)
         self._rowcount = _signed(affected) if statement.is_dml else -1

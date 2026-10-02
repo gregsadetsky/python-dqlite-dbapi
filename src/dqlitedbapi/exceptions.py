@@ -58,8 +58,9 @@ __all__ = [
 FAILED_TO_CONNECT_PREFIX: Final[str] = "Failed to connect: "
 CLUSTER_POLICY_REJECTION_PREFIX: Final[str] = "Cluster policy rejection"
 
-# LEADERSHIP_LOST is raised from the raft apply callback, i.e. after the entry was
-# submitted, so the write is in doubt. NOT_LEADER is a clean pre-apply rejection.
+# LEADERSHIP_LOST comes from the raft apply callback (the entry was submitted) or, in
+# autocommit, from the barrier run before the statement (nothing applied); the client
+# cannot tell them apart, so the write is in doubt. NOT_LEADER is a clean rejection.
 AMBIGUOUS_COMMIT_CODES: Final[frozenset[int]] = frozenset(
     {SQLITE_IOERR_LEADERSHIP_LOST, SQLITE_IOERR_LEADERSHIP_LOST_LEGACY}
 )
@@ -123,7 +124,7 @@ class OperationalError(DatabaseError):
 
 
 class AmbiguousCommitError(OperationalError):
-    """COMMIT lost leadership after the entry was submitted; the write may or may not persist."""
+    """A COMMIT, or a write outside a transaction, ended in doubt; it may or may not persist."""
 
 
 class IntegrityError(DatabaseError):
@@ -295,6 +296,22 @@ async def call[T](awaitable: Awaitable[T]) -> T:
         if mapped is None:
             raise
         raise mapped from exc
+
+
+def is_in_doubt(exc: BaseException) -> bool:
+    """The server may have applied the request: it reported leadership lost, or the session
+    broke before the reply came back."""
+    return getattr(exc, "code", None) in AMBIGUOUS_COMMIT_CODES or isinstance(
+        exc.__cause__, _client.DqliteConnectionError | _client.ProtocolError
+    )
+
+
+def ambiguous_commit(exc: OperationalError, what: str) -> AmbiguousCommitError:
+    return AmbiguousCommitError(
+        f"ambiguous commit: {what}; the write may or may not have been persisted. Original: {exc}",
+        code=exc.code,
+        raw_message=exc.raw_message,
+    )
 
 
 def is_no_transaction_error(exc: BaseException) -> bool:
