@@ -56,6 +56,8 @@ async def _original_leader_restored(cluster_control: TestClusterControl) -> Asyn
             except Exception:  # noqa: BLE001 - mid-election
                 pass
             await asyncio.sleep(0.5)
+        else:
+            raise AssertionError(f"leadership did not return to {original.address}")
 
 
 @pytest.mark.integration
@@ -104,3 +106,32 @@ async def test_commit_whose_reply_is_lost(
         finally:
             await conn.close()
         assert await _rows(cluster_address, database) == [(7,)]
+
+
+@pytest.mark.integration
+async def test_pragma_write_whose_reply_is_lost(
+    cluster_address: str,
+    cluster_control: TestClusterControl,
+    network_faults: NetworkFaults,
+) -> None:
+    database = "in_doubt_" + uuid.uuid4().hex
+    async with _original_leader_restored(cluster_control):
+        conn = AsyncConnection(cluster_address, database=database, timeout=3)
+        try:
+            await conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            client = conn._client
+            assert client is not None and client._protocol is not None
+            client_port = client._protocol._writer.get_extra_info("sockname")[1]
+            with (
+                network_faults.drop_replies(_port(client.address), client_port),
+                pytest.raises(AmbiguousCommitError),
+            ):
+                await conn.execute("PRAGMA user_version = 42")
+        finally:
+            await conn.close()
+        observer = AsyncConnection(cluster_address, database=database, timeout=3)
+        try:
+            cursor = await observer.execute("PRAGMA user_version")
+            assert await cursor.fetchall() == [(42,)]
+        finally:
+            await observer.close()
