@@ -30,6 +30,7 @@ _BUSY_TIMEOUT_PRAGMA_RE: Final = re.compile(
     re.IGNORECASE,
 )
 _INT32_MAX: Final[int] = 2**31 - 1
+_CTE_AS_RE: Final = re.compile(r"\sAS(?=[\s(]|$)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +72,10 @@ def _strip_leading_cte(upper: str) -> str:
     if upper.startswith("RECURSIVE", pos):
         pos = _skip_spaces(upper, pos + len("RECURSIVE"))
     while True:
-        as_idx = upper.find(" AS", pos)
-        if as_idx == -1 or (as_idx + 3 < len(upper) and upper[as_idx + 3] not in " ("):
+        match = _CTE_AS_RE.search(upper, pos)
+        if match is None:
             return upper
+        as_idx = match.start()
         body = upper.find("(", as_idx + 3)
         if body == -1:
             return upper
