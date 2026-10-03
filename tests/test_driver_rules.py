@@ -99,6 +99,32 @@ class TestPlaceholders:
         with pytest.raises(ProgrammingError, match="Incorrect number of bindings"):
             _sql.check_placeholder_count("SELECT ?, ?", (1,))
 
+    @pytest.mark.parametrize(
+        ("sql", "count"),
+        [
+            ("SELECT ?3", 3),
+            ("SELECT ?1, ?1", 1),
+            ("SELECT ?, ?1", 1),
+            ("SELECT ?2, ?", 3),
+            ("SELECT a$b, ':x', \"@y\" FROM t", 0),
+        ],
+    )
+    def test_numbered_placeholders_count_as_sqlite_does(self, sql: str, count: int) -> None:
+        # SQLite binds what it is given and leaves the rest NULL, so a miscount is a silent NULL.
+        assert _sql.placeholder_count(sql) == count
+
+    @pytest.mark.parametrize(
+        ("sql", "params"),
+        [
+            ("INSERT INTO t VALUES (:x)", None),
+            ("SELECT @a, $b", None),
+            ("SELECT :name", ["x"]),
+        ],
+    )
+    def test_named_placeholders_rejected(self, sql: str, params: list[str] | None) -> None:
+        with pytest.raises(ProgrammingError, match="named placeholders"):
+            _sql.check_placeholder_count(sql, params)
+
 
 class TestRewriteBegin:
     @pytest.mark.parametrize(

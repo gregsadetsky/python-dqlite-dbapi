@@ -30,6 +30,8 @@ _BUSY_TIMEOUT_PRAGMA_RE: Final = re.compile(
     re.IGNORECASE,
 )
 _INT32_MAX: Final[int] = 2**31 - 1
+_QMARK_RE: Final = re.compile(r"\?\d*")
+_NAMED_RE: Final = re.compile(r"(?<![\w$])[:@$][^\W\d]\w*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +142,19 @@ def validate_parameters(params: object) -> None:
 
 
 def placeholder_count(sql: str) -> int:
-    return blank_literals_and_comments(sql).count("?")
+    """How many parameters SQLite expects: ``?`` takes the next index, ``?NNN`` is index NNN."""
+    count = 0
+    for mark in _QMARK_RE.findall(blank_literals_and_comments(sql)):
+        count = max(count, int(mark[1:])) if len(mark) > 1 else count + 1
+    return count
 
 
 def check_placeholder_count(sql: str, params: Sequence[Any] | None) -> None:
+    named = _NAMED_RE.search(blank_literals_and_comments(sql))
+    if named is not None:
+        raise ProgrammingError(
+            f"named placeholders ({named.group(0)}) are not supported; use ? (paramstyle qmark)"
+        )
     expected = placeholder_count(sql)
     supplied = 0 if params is None else len(params)
     if expected != supplied:
