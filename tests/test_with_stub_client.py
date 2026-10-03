@@ -6,6 +6,7 @@ can script server replies (result codes, row shapes) that are hard to provoke li
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import os
 from collections.abc import Iterator, Sequence
@@ -524,6 +525,28 @@ class TestConnectionState:
             aconn.cursor()
         with pytest.raises(InterfaceError, match="closed"):
             await aconn.commit()
+
+    @pytest.mark.parametrize("mode", ["deferred", "read_only"])
+    async def test_close_during_the_first_connect_drops_the_late_client(
+        self, stub: StubClient, mode: str
+    ) -> None:
+        aconn = AsyncConnection("localhost:19001", session_mode=mode)
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def connect(*args: Any, **kwargs: Any) -> StubClient:
+            started.set()
+            await finish.wait()
+            return stub
+
+        aconn._cluster.connect = connect  # type: ignore[assignment]
+        task = asyncio.create_task(aconn.connect())
+        await started.wait()
+        await aconn.close()
+        finish.set()
+        with pytest.raises(InterfaceError, match="closed"):
+            await task
+        await aconn.close()
+        assert aconn._client is None and not stub.is_connected
 
     async def test_fork_is_detected(
         self, aconn: AsyncConnection, monkeypatch: pytest.MonkeyPatch

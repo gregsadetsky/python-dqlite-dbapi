@@ -307,6 +307,9 @@ class AsyncConnection(UnsupportedSqlite3Api, ErrorAttributes):
             except BaseException:
                 client.terminate()
                 raise
+        if self._closed:  # close() ran while we were connecting
+            client.terminate()
+            self._check_usable()
         self._client = client
         return client
 
