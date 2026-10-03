@@ -30,6 +30,22 @@ _BUSY_TIMEOUT_PRAGMA_RE: Final = re.compile(
     re.IGNORECASE,
 )
 _INT32_MAX: Final[int] = 2**31 - 1
+_PRAGMA_ARG_RE: Final = re.compile(r"^\s*PRAGMA\s+(?:\w+\s*\.\s*)?(\w+)\s*([=(])?", re.IGNORECASE)
+# PRAGMAs that take an argument and only read; any other PRAGMA with a value may write.
+_PRAGMA_READS_WITH_ARG: Final[frozenset[str]] = frozenset(
+    {
+        "FOREIGN_KEY_CHECK",
+        "FOREIGN_KEY_LIST",
+        "INDEX_INFO",
+        "INDEX_LIST",
+        "INDEX_XINFO",
+        "INTEGRITY_CHECK",
+        "QUICK_CHECK",
+        "TABLE_INFO",
+        "TABLE_LIST",
+        "TABLE_XINFO",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +58,9 @@ class Statement:
     is_pragma: bool
     is_commit: bool
     is_tx_control: bool
+    is_write: bool
+    """Leading keyword is neither a read (SELECT, VALUES, PRAGMA, EXPLAIN) nor tx control,
+    or a PRAGMA given a value."""
 
 
 def classify(sql: str) -> Statement:
@@ -60,7 +79,16 @@ def classify(sql: str) -> Statement:
         is_pragma=keyword == "PRAGMA",
         is_commit=keyword in ("COMMIT", "END"),
         is_tx_control=keyword in _TX_CONTROL,
+        is_write=(keyword not in _ROW_RETURNING and keyword not in _TX_CONTROL)
+        or (keyword == "PRAGMA" and _pragma_sets_a_value(blanked)),
     )
+
+
+def _pragma_sets_a_value(blanked: str) -> bool:
+    match = _PRAGMA_ARG_RE.match(strip_leading_comments(blanked))
+    if match is None or match.group(2) is None:
+        return False
+    return match.group(2) == "=" or match.group(1).upper() not in _PRAGMA_READS_WITH_ARG
 
 
 def _strip_leading_cte(upper: str) -> str:

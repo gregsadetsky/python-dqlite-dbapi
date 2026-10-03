@@ -30,7 +30,7 @@ from dqlitedbapi.exceptions import (
 from dqlitewire import LEADER_ERROR_CODES, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_ERROR, ValueType
 
 NOT_LEADER = min(LEADER_ERROR_CODES - AMBIGUOUS_COMMIT_CODES)
-LEADERSHIP_LOST = min(AMBIGUOUS_COMMIT_CODES)
+IN_DOUBT_CODES = sorted(AMBIGUOUS_COMMIT_CODES)
 
 INT, TEXT, NULL = int(ValueType.INTEGER), int(ValueType.TEXT), int(ValueType.NULL)
 ISO, UNIX = int(ValueType.ISO8601), int(ValueType.UNIXTIME)
@@ -56,6 +56,10 @@ class StubClient:
             error = self.errors.pop(0)
             if self.disconnect_on_error:
                 self.is_connected = False
+            if isinstance(error, client_exc.DqliteConnectionError | client_exc.ProtocolError) or (
+                getattr(error, "code", None) in LEADER_ERROR_CODES
+            ):
+                self.in_transaction = False  # the real client drops the session and its flag
             raise error
         verb = sql.split()[0].upper()
         if verb == "BEGIN":
@@ -279,20 +283,22 @@ class TestTransactions:
         with pytest.raises(IntegrityError):
             await aconn.commit()
 
+    @pytest.mark.parametrize("code", IN_DOUBT_CODES)
     async def test_leadership_lost_during_commit_is_ambiguous(
-        self, aconn: AsyncConnection, stub: StubClient
+        self, aconn: AsyncConnection, stub: StubClient, code: int
     ) -> None:
         await aconn.execute("BEGIN")
-        stub.errors.append(server_error(LEADERSHIP_LOST, "leadership lost"))
+        stub.errors.append(server_error(code, "leadership lost"))
         with pytest.raises(AmbiguousCommitError) as info:
             await aconn.commit()
-        assert info.value.code == LEADERSHIP_LOST
+        assert info.value.code == code
 
+    @pytest.mark.parametrize("code", IN_DOUBT_CODES)
     async def test_leadership_lost_on_explicit_commit_statement_is_ambiguous(
-        self, aconn: AsyncConnection, stub: StubClient
+        self, aconn: AsyncConnection, stub: StubClient, code: int
     ) -> None:
         await aconn.execute("BEGIN")
-        stub.errors.append(server_error(LEADERSHIP_LOST, "leadership lost"))
+        stub.errors.append(server_error(code, "leadership lost"))
         with pytest.raises(AmbiguousCommitError):
             await aconn.execute("COMMIT")
 
@@ -305,13 +311,123 @@ class TestTransactions:
             await aconn.commit()
         assert type(info.value) is OperationalError
 
-    async def test_leadership_lost_on_insert_is_not_ambiguous(
-        self, aconn: AsyncConnection, stub: StubClient
+    @pytest.mark.parametrize("code", IN_DOUBT_CODES)
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET v = 1",
+            "DELETE FROM t",
+            "REPLACE INTO t VALUES (1)",
+            "INSERT INTO t VALUES (1) RETURNING id",
+            "CREATE TABLE u (id INTEGER)",
+        ],
+    )
+    async def test_leadership_lost_on_autocommit_write_is_ambiguous(
+        self, aconn: AsyncConnection, stub: StubClient, sql: str, code: int
     ) -> None:
-        stub.errors.append(server_error(LEADERSHIP_LOST, "leadership lost"))
+        stub.errors.append(server_error(code, "leadership lost"))
+        with pytest.raises(AmbiguousCommitError) as info:
+            await aconn.execute(sql)
+        assert info.value.code == code
+
+    @pytest.mark.parametrize(
+        "lost",
+        [
+            client_exc.DqliteConnectionError("Server read timed out"),
+            client_exc.ProtocolError("bad frame"),
+        ],
+    )
+    async def test_lost_reply_on_autocommit_write_is_ambiguous(
+        self, aconn: AsyncConnection, stub: StubClient, lost: BaseException
+    ) -> None:
+        stub.disconnect_on_error = True
+        stub.errors.append(lost)
+        with pytest.raises(AmbiguousCommitError):
+            await aconn.execute("INSERT INTO t VALUES (1)")
+
+    @pytest.mark.parametrize("via_statement", [False, True])
+    async def test_lost_reply_on_commit_is_ambiguous(
+        self, aconn: AsyncConnection, stub: StubClient, via_statement: bool
+    ) -> None:
+        await aconn.execute("BEGIN")
+        stub.disconnect_on_error = True
+        stub.errors.append(client_exc.DqliteConnectionError("Read failed: connection reset"))
+        with pytest.raises(AmbiguousCommitError):
+            if via_statement:
+                await aconn.execute("COMMIT")
+            else:
+                await aconn.commit()
+
+    @pytest.mark.parametrize("code", IN_DOUBT_CODES)
+    async def test_release_in_doubt_is_ambiguous(
+        self, aconn: AsyncConnection, stub: StubClient, code: int
+    ) -> None:
+        await aconn.execute("SAVEPOINT a")
+        stub.errors.append(server_error(code, "leadership lost"))
+        with pytest.raises(AmbiguousCommitError):
+            await aconn.execute("RELEASE a")
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            server_error(IN_DOUBT_CODES[-1], "leadership lost"),
+            client_exc.DqliteConnectionError("Read failed: connection reset"),
+        ],
+    )
+    async def test_write_inside_a_transaction_that_loses_the_session_is_a_plain_failure(
+        self, aconn: AsyncConnection, stub: StubClient, error: BaseException
+    ) -> None:
+        await aconn.execute("BEGIN")
+        stub.errors.append(error)
         with pytest.raises(OperationalError) as info:
             await aconn.execute("INSERT INTO t VALUES (1)")
         assert type(info.value) is OperationalError
+
+    async def test_lost_reply_on_a_read_is_a_plain_failure(
+        self, aconn: AsyncConnection, stub: StubClient
+    ) -> None:
+        stub.errors.append(client_exc.DqliteConnectionError("Read failed: connection reset"))
+        with pytest.raises(OperationalError) as info:
+            await aconn.execute("SELECT 1")
+        assert type(info.value) is OperationalError
+
+    @pytest.mark.parametrize(
+        "sql",
+        ["PRAGMA user_version = 42", "pragma main.application_id=7", "PRAGMA user_version(42)"],
+    )
+    async def test_lost_reply_on_autocommit_pragma_write_is_ambiguous(
+        self, aconn: AsyncConnection, stub: StubClient, sql: str
+    ) -> None:
+        stub.disconnect_on_error = True
+        stub.errors.append(client_exc.DqliteConnectionError("Read failed: connection reset"))
+        with pytest.raises(AmbiguousCommitError):
+            await aconn.execute(sql)
+
+    @pytest.mark.parametrize("sql", ["PRAGMA user_version", "PRAGMA table_info(t)"])
+    async def test_lost_reply_on_pragma_read_is_a_plain_failure(
+        self, aconn: AsyncConnection, stub: StubClient, sql: str
+    ) -> None:
+        stub.disconnect_on_error = True
+        stub.errors.append(client_exc.DqliteConnectionError("Read failed: connection reset"))
+        with pytest.raises(OperationalError) as info:
+            await aconn.execute(sql)
+        assert type(info.value) is OperationalError
+
+    async def test_not_leader_on_autocommit_write_is_a_plain_failure(
+        self, aconn: AsyncConnection, stub: StubClient
+    ) -> None:
+        stub.errors.append(server_error(NOT_LEADER, "not leader"))
+        with pytest.raises(OperationalError) as info:
+            await aconn.execute("INSERT INTO t VALUES (1)")
+        assert type(info.value) is OperationalError
+
+    def test_sync_autocommit_write_in_doubt_is_ambiguous(
+        self, conn: dqlitedbapi.Connection, stub: StubClient
+    ) -> None:
+        stub.errors.append(server_error(IN_DOUBT_CODES[-1], "leadership lost"))
+        with pytest.raises(AmbiguousCommitError):
+            conn.cursor().execute("INSERT INTO t VALUES (1)")
 
     async def test_transaction_block_commits(
         self, aconn: AsyncConnection, stub: StubClient
@@ -562,7 +678,7 @@ class TestSyncSurface:
         conn.rollback()
         assert stub.sql == ["BEGIN IMMEDIATE", "ROLLBACK"]
         conn.execute("BEGIN")
-        stub.errors.append(server_error(LEADERSHIP_LOST, "leadership lost"))
+        stub.errors.append(server_error(IN_DOUBT_CODES[-1], "leadership lost"))
         with pytest.raises(AmbiguousCommitError):
             conn.commit()
 

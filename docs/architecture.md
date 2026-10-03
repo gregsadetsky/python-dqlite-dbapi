@@ -126,9 +126,11 @@ semantic rules the driver adds on top.
 - `commit()` / `rollback()` are no-ops before the first connection and when no
   transaction is open. A server reply of "no transaction is active" is
   swallowed. Every other failure propagates.
-- A `COMMIT` that fails with a leadership-lost code raises
-  `AmbiguousCommitError` (an `OperationalError`): the write may or may not
-  have been applied.
+- A `COMMIT`, a `RELEASE`, or a write outside a transaction (where it is its
+  own commit) that fails with a leadership-lost code or loses the session
+  before the reply raises `AmbiguousCommitError` (an `OperationalError`): the
+  write may or may not have been applied. Inside a transaction a lost session
+  takes the transaction with it, so a write there fails plainly.
 - `transaction()` is a context manager issuing `BEGIN` / `COMMIT` /
   `ROLLBACK`. Calling `commit()` or `rollback()` inside the block raises
   `InterfaceError`, because the block owns the boundaries.
