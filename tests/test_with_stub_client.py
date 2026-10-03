@@ -475,6 +475,12 @@ class TestExecutemany:
         assert await cur.fetchall() == [(1,), (1,)]
         assert cur.rowcount == 2
 
+    async def test_cte_on_its_own_line(self, aconn: AsyncConnection, stub: StubClient) -> None:
+        stub.exec_reply = (5, 1)
+        sql = "WITH c(x)\nAS (SELECT ?)\nINSERT INTO t SELECT x FROM c"
+        cur = await aconn.executemany(sql, [(1,), (2,)])
+        assert cur.rowcount == 2 and stub.sql == [sql, sql]
+
     async def test_empty_sequence(self, aconn: AsyncConnection, stub: StubClient) -> None:
         cur = await aconn.executemany("INSERT INTO t VALUES (?)", [])
         assert cur.rowcount == 0 and stub.sql == []
