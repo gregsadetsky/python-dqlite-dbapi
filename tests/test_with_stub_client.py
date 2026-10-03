@@ -392,6 +392,28 @@ class TestTransactions:
             await aconn.execute("SELECT 1")
         assert type(info.value) is OperationalError
 
+    @pytest.mark.parametrize(
+        "sql",
+        ["PRAGMA user_version = 42", "pragma main.application_id=7", "PRAGMA user_version(42)"],
+    )
+    async def test_lost_reply_on_autocommit_pragma_write_is_ambiguous(
+        self, aconn: AsyncConnection, stub: StubClient, sql: str
+    ) -> None:
+        stub.disconnect_on_error = True
+        stub.errors.append(client_exc.DqliteConnectionError("Read failed: connection reset"))
+        with pytest.raises(AmbiguousCommitError):
+            await aconn.execute(sql)
+
+    @pytest.mark.parametrize("sql", ["PRAGMA user_version", "PRAGMA table_info(t)"])
+    async def test_lost_reply_on_pragma_read_is_a_plain_failure(
+        self, aconn: AsyncConnection, stub: StubClient, sql: str
+    ) -> None:
+        stub.disconnect_on_error = True
+        stub.errors.append(client_exc.DqliteConnectionError("Read failed: connection reset"))
+        with pytest.raises(OperationalError) as info:
+            await aconn.execute(sql)
+        assert type(info.value) is OperationalError
+
     async def test_not_leader_on_autocommit_write_is_a_plain_failure(
         self, aconn: AsyncConnection, stub: StubClient
     ) -> None:
