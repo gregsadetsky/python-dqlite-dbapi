@@ -69,11 +69,11 @@ def test_named_param_sql_with_dict_rejected_with_mapping_diagnostic(
         cur.execute("SELECT :name", {"name": "x"})  # type: ignore[arg-type]
 
 
-def test_named_param_sql_with_list_falls_through_to_bind_count(
+def test_named_param_sql_with_list_rejected(
     cur: dqlitedbapi.Cursor,
 ) -> None:
-    """``:name`` SQL (0 placeholders) with a 1-element sequence hits bind-count."""
-    with pytest.raises(ProgrammingError, match="Incorrect number of bindings"):
+    """``:name`` SQL is rejected up front, with or without a sequence."""
+    with pytest.raises(ProgrammingError, match="named placeholders"):
         cur.execute("SELECT :name", ["x"])
 
 
