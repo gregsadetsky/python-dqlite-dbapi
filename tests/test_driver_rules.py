@@ -53,6 +53,21 @@ class TestClassify:
     def test_not_row_returning(self, sql: str) -> None:
         assert not _sql.classify(sql).returns_rows
 
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c",
+            "WITH c\nAS (SELECT 1) INSERT INTO t SELECT * FROM c",
+            "WITH c\tAS\t(SELECT 1) INSERT INTO t SELECT * FROM c",
+            "WITH c AS\n(SELECT 1) INSERT INTO t SELECT * FROM c",
+            "WITH c /* x */AS (SELECT 1) INSERT INTO t SELECT * FROM c",
+            "WITH c(x)\nAS (SELECT 1), d AS\n(SELECT 2) INSERT INTO t SELECT * FROM c",
+        ],
+    )
+    def test_cte_prefix_skipped_whatever_the_whitespace(self, sql: str) -> None:
+        stmt = _sql.classify(sql)
+        assert (stmt.keyword, stmt.is_insert, stmt.returns_rows) == ("INSERT", True, False)
+
     def test_dml_flags(self) -> None:
         stmt = _sql.classify("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c")
         assert stmt.is_dml and stmt.is_insert and not stmt.is_pragma
